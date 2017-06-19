@@ -17,7 +17,8 @@ BOOTSTRAP_SERVERS= 'ec2-52-52-231-158.us-west-1.compute.amazonaws.com:9092'
 
 def process_arguments():
     parser = argparse.ArgumentParser()
-    parser.add_argument("series", help = '<series>.data is read for messages to produce')
+    parser.add_argument("--series", required=True, help = '<series>.data is read for messages to produce')
+    parser.add_argument("--topic", required=True, help = 'Kafka topic to send messages to')
     args = parser.parse_args()
     try: 
         infile = open(args.series+'.data', 'r')
@@ -27,18 +28,18 @@ def process_arguments():
     return (args, infile) 
 
 
-def produce_messages(series, infile):
+def produce_messages(series, infile, topic):
     producer = KafkaProducer(bootstrap_servers=BOOTSTRAP_SERVERS, \
          value_serializer=lambda v: json.dumps(v).encode('utf-8')) 
     for line in infile:
         (timestamp, value)=line.split()
         print series, timestamp, value
-        producer.send('testing', {'series': series,\
+        producer.send(topic, {'series': series,\
                                   'timestamp': timestamp,\
                                   'value': value})
     producer.flush()
 
 #  main starts here
 (args, infile) = process_arguments()
-produce_messages(args.series, infile)
+produce_messages(args.series, infile, args.topic)
 
