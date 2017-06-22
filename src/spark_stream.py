@@ -13,8 +13,25 @@ import argparse
 import sys
 import datetime
 
-ZOOKEEPER_SERVERS= 'ec2-52-52-231-158.us-west-1.compute.amazonaws.com:2181'
-CASSANDRA_SERVERS= ['ec2-13-56-105-222.us-west-1.compute.amazonaws.com', 'ec2-54-67-109-59.us-west-1.compute.amazonaws.com']
+class PipelineContext:
+    def __init__(self, topic, batch_duration, keyspace):
+       self._ZOOKEEPER_SERVERS= 'ec2-52-52-231-158.us-west-1.compute.amazonaws.com:2181'
+       self._CASSANDRA_SERVERS= ['ec2-13-56-105-222.us-west-1.compute.amazonaws.com', 'ec2-54-67-109-59.us-west-1.compute.amazonaws.com']
+       self._sc = SparkContext(appName="insight_project")
+       self._ssc = StreamingContext(self._sc, batch_duration)
+       self._cluster = Cluster(self._CASSANDRA_SERVERS)
+       self._session = self._cluster.connect(keyspace)
+       self._kafka_stream = KafkaUtils.createStream(self._ssc, self._ZOOKEEPER_SERVERS, "group1", {topic:2})
+    def kafka_stream(self):
+        return self._kafka_stream
+    def spark_context(self):
+        return self._sc
+    def cassandra_session(self):
+        return self._session
+    def start(self):
+        self._ssc.start()
+        self._ssc.awaitTermination()
+
 
 
 def process_arguments():
@@ -59,7 +76,7 @@ def sum_rdd(newdata):
     if cumulative_rdd is None:
         cumulative_rdd = newdata.map(lambda x: x)
     else:
-        cumulative_rdd= cumulative_rdd.union(newdata).reduceByKey(lambda a, b: (a[0] + b[0], a[1] + b[1]))
+        cumulative_rdd= cumulative_rdd.union(newdata).reduceByKey(reducefunc)
         print_cumulative_rdd(cumulative_rdd)
 
 def window_rdd(newdata):
@@ -75,8 +92,8 @@ def window_rdd(newdata):
     
 #main starts here
 args = process_arguments()
-sc = SparkContext(appName="insight_project")
-ssc = StreamingContext(sc, args.batch_duration)
+pipeline = PipelineContext(args.topic, args.batch_duration, args.keyspace)
+new_messages = pipeline.kafka_stream().map(parse_json_message)
 
 
 """
@@ -85,20 +102,18 @@ ssc = StreamingContext(sc, args.batch_duration)
  The array contains the 3 latest values of 'test', starting with the given
  initital values set to None. 
 """
-cumulative_rdd = sc.parallelize([('test',(3,[None,None,None])), ('blah',(2,[None,None]))])
+cumulative_rdd = pipeline.spark_context()\
+            .parallelize([('test',(3,[None,None,None])),\
+                          ('blah',(2,[None,None]))])
 
-cassandra_cluster = Cluster(CASSANDRA_SERVERS)
-cassandra_session = cassandra_cluster.connect(args.keyspace)
-
-kafka_stream = KafkaUtils.createStream(ssc, ZOOKEEPER_SERVERS, "group1", {args.topic:2})
-new_messages = kafka_stream.map(parse_json_message)
-new_messages.foreachRDD(lambda rdd :write_to_cassandra(rdd,cassandra_session))
+new_messages.foreachRDD(lambda rdd :write_to_cassandra(rdd,pipeline.cassandra_session()))
 
 
-mapped = new_messages.map(lambda x: (x[0],(int(x[2]), 1)))
-counts= mapped.reduceByKey(lambda a, b: (a[0] + b[0], a[1] + b[1]))
+mapped = new_messages.map(lambda x: (x[0],(int(x[2]),int(x[2]),int(x[2]), 1)))
+reducefunc = lambda a, b:(max(a[0],b[0]),min(a[1],b[1]),a[2]+b[2],a[3] + b[3])
+counts= mapped.reduceByKey(reducefunc)
 
 counts.foreachRDD(window_rdd)
 
-ssc.start()   
-ssc.awaitTermination() 
+pipeline.start()
+
