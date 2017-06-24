@@ -10,6 +10,7 @@ import json
 import argparse
 import sys
 import datetime
+import alerts
 
 def process_arguments():
     parser = argparse.ArgumentParser()
@@ -27,6 +28,15 @@ def write_to_cassandra(rdd, session):
        dt = datetime.datetime.fromtimestamp(msg[1])
        session.execute("INSERT INTO series_data (series, year, month, day, hour, minute, timestamp, value) values (%s,%s,%s,%s,%s,%s,%s,%s)",(msg[0],dt.year,dt.month,dt.day, dt.hour, dt.minute, dt, msg[2]))
 
+
+def create_results(series_macrobatch):
+    alert_function = alerts.alert_funcs[series_macrobatch[1][1]]
+    batch_data = series_macrobatch[1][2]
+    print "batch_data"
+    print batch_data
+    results = alert_function(batch_data)
+    return (series_macrobatch[0], results)
+  
 
 class PipelineContext:
     def __init__(self, topic, batch_duration, keyspace):
@@ -68,23 +78,41 @@ class WindowState:
     def __init__(self,pipeline,window_sizes):
         windows_list=[] 
         for line in window_sizes:
-            (series,window_size) = line.strip().split(',')
+            splits= line.strip().split(',')
+            if len(splits) == 3:
+               (series,window_size,aggregate_func) = splits
+            else: 
+               (series,window_size) = splits
+               aggregate_func= None
             window_size= int(window_size)
-            windows_list.append((series,(window_size,[None] * window_size)))
+            windows_list.append((series,(window_size,aggregate_func, [None] * window_size)))
         self._cumulative_rdd = pipeline.spark_context()\
             .parallelize(windows_list)
         
     def accumulate_rdd(self, dstream, newdata):
+        for m in newdata.collect():
+             print m
         #dstream is to be ignored -- an artifact of calling from foreachRDD
         if self._cumulative_rdd is not None:
+            for m in self._cumulative_rdd.collect():
+                print m
             self._cumulative_rdd= self._cumulative_rdd.leftOuterJoin(newdata)\
-                        .map(lambda x: (x[0], (x[1][0][0], x[1][0][1] + [x[1][1]])))\
-                        .map(lambda x: (x[0],(x[1][0],x[1][1][-x[1][0]:])))
+                        .map(lambda x: (x[0], (x[1][0][0], x[1][0][1], x[1][0][2] + [x[1][1]])))\
+                        .map(lambda x: (x[0],(x[1][0],x[1][1],x[1][2][-x[1][0]:])))
         self.print_cumulative_rdd()
+        results = self._cumulative_rdd.map(lambda x: create_results(x))
+        self.print_results(results)
+
+    def print_results(self,rdd):
+        print "Results/Alerts"
+        #for m in rdd.take(10):
+        for m in rdd.collect():
+            print m
+        print "Cumulative RDD end"
 
     def print_cumulative_rdd(self):
         print "Cumulative RDD start"
-        for m in self._cumulative_rdd.collect():
+        for m in  self._cumulative_rdd.collect():
             print m
         print "Cumulative RDD end"
 
