@@ -21,41 +21,48 @@ def process_arguments():
     args = parser.parse_args()
     return args
 
-def write_to_cassandra(rdd, session):
-    msgs = rdd.collect()
-    for msg in msgs:
-       print msg
-       dt = datetime.datetime.fromtimestamp(msg[1])
-       session.execute("INSERT INTO series_data (series, year, month, day, hour, minute, timestamp, value) values (%s,%s,%s,%s,%s,%s,%s,%s)",(msg[0],dt.year,dt.month,dt.day, dt.hour, dt.minute, dt, msg[2]))
-
-
-def create_results(series_macrobatch):
-    alert_function = alerts.alert_funcs[series_macrobatch[1][1]]
-    batch_data = series_macrobatch[1][2]
-    print "batch_data"
-    print batch_data
-    results = alert_function(batch_data)
-    return (series_macrobatch[0], results)
-  
 
 class PipelineContext:
-    def __init__(self, topic, batch_duration, keyspace):
+    def __init__(self, topic, batch_duration):
        self._ZOOKEEPER_SERVERS= 'ec2-52-52-231-158.us-west-1.compute.amazonaws.com:2181'
-       self._CASSANDRA_SERVERS= ['ec2-13-56-105-222.us-west-1.compute.amazonaws.com', 'ec2-54-67-109-59.us-west-1.compute.amazonaws.com']
        self._sc = SparkContext(appName="insight_project")
        self._ssc = StreamingContext(self._sc, batch_duration)
-       self._cluster = Cluster(self._CASSANDRA_SERVERS)
-       self._session = self._cluster.connect(keyspace)
        self._kafka_stream = KafkaUtils.createStream(self._ssc, self._ZOOKEEPER_SERVERS, "group1", {topic:2})
+
     def kafka_stream(self):
         return self._kafka_stream
+
     def spark_context(self):
         return self._sc
-    def cassandra_session(self):
-        return self._session
+
     def start(self):
         self._ssc.start()
         self._ssc.awaitTermination()
+
+class Cassandra_DB:
+    def __init__(self, keyspace):
+       self._CASSANDRA_SERVERS= ['ec2-13-56-105-222.us-west-1.compute.amazonaws.com', 'ec2-54-67-109-59.us-west-1.compute.amazonaws.com']
+       self._cluster = Cluster(self._CASSANDRA_SERVERS)
+       self._session = self._cluster.connect(keyspace)
+
+
+    def write_to_cassandra(self, dummy, rdd):
+        count= rdd.count()
+        msgs = rdd.take(min(count,1))
+        print "batch size:%d " % count
+        if count > 0:
+            print "first: ", msgs[0]
+        # collect() for testing only
+        #for msg in rdd.collect():
+            #print msg
+            #write_one_row(msg, self._session)
+        new= rdd.map(lambda x: write_one_row(x,self._session))
+        
+def write_one_row(msg, session):
+    dt = datetime.datetime.fromtimestamp(msg[1])
+    session.execute("INSERT INTO series_data (series, year, month, day, hour, minute, timestamp, value) values (%s,%s,%s,%s,%s,%s,%s,%s)",(msg[0],dt.year,dt.month,dt.day, dt.hour, dt.minute, dt, msg[2]))
+    return msg[0]
+
   
     """
 Class WindowState manages the sliding windows for all series.
@@ -90,22 +97,19 @@ class WindowState:
             .parallelize(windows_list)
         
     def accumulate_rdd(self, dstream, newdata):
-        for m in newdata.collect():
-             print m
         #dstream is to be ignored -- an artifact of calling from foreachRDD
+        #for m in newdata.collect():  # testing only
+             #print m
         if self._cumulative_rdd is not None:
-            for m in self._cumulative_rdd.collect():
-                print m
             self._cumulative_rdd= self._cumulative_rdd.leftOuterJoin(newdata)\
                         .map(lambda x: (x[0], (x[1][0][0], x[1][0][1], x[1][0][2] + [x[1][1]])))\
                         .map(lambda x: (x[0],(x[1][0],x[1][1],x[1][2][-x[1][0]:])))
         self.print_cumulative_rdd()
         results = self._cumulative_rdd.map(lambda x: create_results(x))
         self.print_results(results)
-
+    # the two methods below only uised for testing
     def print_results(self,rdd):
         print "Results/Alerts"
-        #for m in rdd.take(10):
         for m in rdd.collect():
             print m
         print "Cumulative RDD end"
@@ -117,22 +121,23 @@ class WindowState:
         print "Cumulative RDD end"
 
 
-def write_to_cassandra(rdd, session):
-    msgs = rdd.collect()
-    for msg in msgs:
-       print msg
-       dt = datetime.datetime.fromtimestamp(msg[1])
-       session.execute("INSERT INTO series_data (series, year, month, day, hour, minute, timestamp, value) values (%s,%s,%s,%s,%s,%s,%s,%s)",(msg[0],dt.year,dt.month,dt.day, dt.hour, dt.minute, dt, msg[2]))
-
 def parse_json_message(x):
-   dict= json.loads(x[1])
-   return (dict['series'],int(dict['timestamp']),int(dict['value']))
+    dict= json.loads(x[1])
+    return (dict['series'],float(dict['timestamp']),int(dict['value']))
+
+def create_results(series_macrobatch):
+    alert_function = alerts.alert_funcs[series_macrobatch[1][1]]
+    batch_data = series_macrobatch[1][2]
+    results = alert_function(batch_data)
+    return (series_macrobatch[0], results)
+  
 
     
 #main starts here
 args = process_arguments()
 
-pipeline = PipelineContext(args.topic, args.batch_duration, args.keyspace)
+pipeline = PipelineContext(args.topic, args.batch_duration)
+database = Cassandra_DB(args.keyspace)
 
 # initialiaze window state
 windowstate = WindowState(pipeline, args.window_sizes)
@@ -142,7 +147,7 @@ new_messages = pipeline.kafka_stream().map(parse_json_message)
 
 #save message to cassandra with series as the partition key and year,month,
 # date, hour, minute, timestamp as the clustering keys
-new_messages.foreachRDD(lambda rdd :write_to_cassandra(rdd,pipeline.cassandra_session()))
+new_messages.foreachRDD(database.write_to_cassandra)
 
 # map produces tuples of type (series,(value,value,value,value))
 mapped = new_messages.map(lambda x: (x[0],(int(x[2]),int(x[2]),int(x[2]), 1)))
