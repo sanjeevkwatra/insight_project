@@ -1,6 +1,4 @@
 #!/usr/bin/python
-# Process  messages in  topic "topic" and store results in Cassandra keyspace# "keyspace". Batch duration comes in as batch_duration
-# Cassandra interface not yet implemented
 
 from pyspark import SparkContext
 from pyspark.streaming import StreamingContext
