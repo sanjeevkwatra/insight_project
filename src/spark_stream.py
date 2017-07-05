@@ -8,6 +8,7 @@ import json
 import argparse
 import sys
 import datetime
+import time
 import alerts
 
 def process_arguments():
@@ -39,30 +40,33 @@ class PipelineContext:
 
 class Cassandra_DB:
     def __init__(self, keyspace):
-       self._CASSANDRA_SERVERS= ['ec2-13-56-105-222.us-west-1.compute.amazonaws.com', 'ec2-54-67-109-59.us-west-1.compute.amazonaws.com']
+       self._CASSANDRA_SERVERS= ['ec2-13-56-105-222.us-west-1.compute.amazonaws.com', 'ec2-54-67-109-59.us-west-1.compute.amazonaws.com']  
        self._cluster = Cluster(self._CASSANDRA_SERVERS)
        self._session = self._cluster.connect(keyspace)
-
+       self._total_processed= 0
 
     def write_to_cassandra(self, dummy, rdd):
         count= rdd.count()
         msgs = rdd.take(min(count,1))
         print "batch size:%d " % count
-        if count > 0:
-            print "first: ", msgs[0]
-        # collect() for testing only
-        #for msg in rdd.collect():
+        #if count > 0:
+            #print "first: ", msgs[0]
+         #collect() for testing only
+        #msgs= rdd.collect()
+        #for msg in msgs:
             #print msg
-            #write_one_row(msg, self._session)
-        new= rdd.map(lambda x: write_one_row(x,self._session))
+            #write_one_row(msg, self._session) 
+        self._total_processed += count
+        print "processed  %d tot %d at %s" % (count, self._total_processed, time.ctime())
+        #rdd.foreach(lambda x: write_one_row(x))
         
-def write_one_row(msg, session):
+def write_one_row(msg,session):
     dt = datetime.datetime.fromtimestamp(msg[1])
     session.execute("INSERT INTO series_data (series, year, month, day, hour, minute, timestamp, value) values (%s,%s,%s,%s,%s,%s,%s,%s)",(msg[0],dt.year,dt.month,dt.day, dt.hour, dt.minute, dt, msg[2]))
-    return msg[0]
+
 
   
-    """
+"""
 Class WindowState manages the sliding windows for all series.
  The constructor for WindowState takes the  window sizes from a file 
  which comes in as a command line argument 
@@ -78,7 +82,7 @@ Class WindowState manages the sliding windows for all series.
   accumulate_rdd adds newdata (from the latest microbatch) on to 
   _cumulative_rdd. Data from the oldest batches (depending on the size
   of window for each series) is discarded
-    """
+"""
 class WindowState:
     def __init__(self,pipeline,window_sizes):
         windows_list=[] 
@@ -102,9 +106,10 @@ class WindowState:
             self._cumulative_rdd= self._cumulative_rdd.leftOuterJoin(newdata)\
                         .map(lambda x: (x[0], (x[1][0][0], x[1][0][1], x[1][0][2] + [x[1][1]])))\
                         .map(lambda x: (x[0],(x[1][0],x[1][1],x[1][2][-x[1][0]:])))
-        self.print_cumulative_rdd()
+        #self.print_cumulative_rdd()
         results = self._cumulative_rdd.map(lambda x: create_results(x))
-        self.print_results(results)
+        #self.print_results(results)
+
     # the two methods below only uised for testing
     def print_results(self,rdd):
         print "Results/Alerts"
@@ -133,12 +138,14 @@ def create_results(series_macrobatch):
     
 #main starts here
 args = process_arguments()
-
 pipeline = PipelineContext(args.topic, args.batch_duration)
 database = Cassandra_DB(args.keyspace)
 
 # initialiaze window state
-windowstate = WindowState(pipeline, args.window_sizes)
+if args.window_sizes:
+    windowstate = WindowState(pipeline, args.window_sizes)
+else:
+    windowstate= None
 
 # new_messages contains data from a new micro-batch
 new_messages = pipeline.kafka_stream().map(parse_json_message)
@@ -147,13 +154,15 @@ new_messages = pipeline.kafka_stream().map(parse_json_message)
 # date, hour, minute, timestamp as the clustering keys
 new_messages.foreachRDD(database.write_to_cassandra)
 
-# map produces tuples of type (series,(value,value,value,value))
-mapped = new_messages.map(lambda x: (x[0],(int(x[2]),int(x[2]),int(x[2]), 1)))
-#reduce produces tuples of type (series,(max, min, sum, count))
-reducefunc = lambda a, b:(max(a[0],b[0]),min(a[1],b[1]),a[2]+b[2],a[3] + b[3])
-counts= mapped.reduceByKey(reducefunc)
+if windowstate:
+    # map produces tuples of type (series,(value,value,value,value))
+    mapped = new_messages.map(lambda x: (x[0],(int(x[2]),int(x[2]),int(x[2]), 1)))
+    #reduce produces tuples of type (series,(max, min, sum, count))
+    reducefunc = lambda a, b:(max(a[0],b[0]),min(a[1],b[1]),a[2]+b[2],a[3] + b[3])
+    counts= mapped.reduceByKey(reducefunc)
 
-counts.foreachRDD(windowstate.accumulate_rdd)
+    counts.foreachRDD(windowstate.accumulate_rdd)
+
 
 pipeline.start()
 
