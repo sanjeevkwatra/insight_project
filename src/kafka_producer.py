@@ -11,7 +11,6 @@ import argparse
 import sys
 import datetime
 import random
-import pdb
 
 BOOTSTRAP_SERVERS= 'ec2-52-52-231-158.us-west-1.compute.amazonaws.com:9092'
 
@@ -30,6 +29,7 @@ def process_arguments():
 
 def produce_messages(series, infile, topic):
     producer = KafkaProducer(bootstrap_servers=BOOTSTRAP_SERVERS, \
+         batch_size=65536,\
          value_serializer=lambda v: json.dumps(v).encode('utf-8')) 
     for line in infile:
         (timestamp, value)=line.split()

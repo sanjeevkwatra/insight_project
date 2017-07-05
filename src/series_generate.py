@@ -14,8 +14,6 @@ def process_arguments():
     parser.add_argument("series_name", help = 'The output file is <series_name>.data')
     parser.add_argument("--start_time", type=int, required=True, help = 'Epoch time for first message')
     parser.add_argument("--end_time", type=int, required=True, help = 'Epoch time for last message')
-    parser.add_argument("--min", type=int, required=True, help = 'lower bound for value; must be >=0')
-    parser.add_argument("--max", type=int, required=True, help = 'upper bound for value; must be >=min')
     parser.add_argument("--rate", type=float, required=True, help = 'number of messages per second')
     parser.add_argument("--type", required=True, help = 'Type of Series. Trend goes from min to max. Period goes from min to max and back to min in time "period"', choices=('random', 'trend', 'periodic'))
     parser.add_argument("--period", type=float, help = 'time period in seconds for periodic series')
@@ -95,8 +93,9 @@ def generate_series(args):
 
 
 #  main starts here
-args = process_arguments()
-generate_series(args)
+if __name__ == "__main__":
+    args = process_arguments()
+    generate_series(args)
 
 
 
